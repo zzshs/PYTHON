@@ -1,0 +1,100 @@
+"""
+Document Collection Pipeline
+============================
+
+This script collects heterogeneous financial documents (PDF, Excel, Word, CSV)
+from a source directory and prepares a clean, reproducible input folder
+for downstream processing.
+
+Design principles:
+- Dataset-agnostic
+- No hard-coded personal paths
+- Explicit separation from conversion/analysis logic
+"""
+
+import os
+import shutil
+from typing import List
+
+# -------------------------------------------------
+# 0. Configuration
+# -------------------------------------------------
+
+SUPPORTED_EXTENSIONS = [
+    ".pdf",
+    ".xlsx",
+    ".xls",
+    ".csv",
+    ".docx",
+]
+
+# Raw source directory (can be replaced by any mounted folder)
+SOURCE_DIR = "./raw_documents"
+
+# Clean input directory for downstream pipelines
+TARGET_DIR = "./sample_inputs"
+
+os.makedirs(TARGET_DIR, exist_ok=True)
+
+# -------------------------------------------------
+# 1. Core logic
+# -------------------------------------------------
+
+def collect_documents(
+    source_dir: str,
+    target_dir: str,
+    extensions: List[str],
+) -> List[str]:
+    """
+    Walk through source_dir recursively and copy supported files
+    into target_dir.
+
+    Returns a list of collected file paths.
+    """
+    collected_files = []
+
+    for root, _, files in os.walk(source_dir):
+        for file in files:
+            ext = os.path.splitext(file)[1].lower()
+            if ext in extensions:
+                src_path = os.path.join(root, file)
+                dst_path = os.path.join(target_dir, file)
+
+                # Avoid overwriting files with the same name
+                if os.path.exists(dst_path):
+                    base, ext = os.path.splitext(file)
+                    counter = 1
+                    while os.path.exists(dst_path):
+                        dst_path = os.path.join(
+                            target_dir, f"{base}_{counter}{ext}"
+                        )
+                        counter += 1
+
+                shutil.copy2(src_path, dst_path)
+                collected_files.append(dst_path)
+
+    return collected_files
+
+# -------------------------------------------------
+# 2. Entry point
+# -------------------------------------------------
+
+if __name__ == "__main__":
+
+    print("Starting document collection...")
+    print(f"Source directory : {SOURCE_DIR}")
+    print(f"Target directory : {TARGET_DIR}")
+
+    files = collect_documents(
+        source_dir=SOURCE_DIR,
+        target_dir=TARGET_DIR,
+        extensions=SUPPORTED_EXTENSIONS,
+    )
+
+    print("-" * 50)
+    print(f"Collected {len(files)} documents:")
+    for f in files:
+        print(" -", os.path.basename(f))
+
+    print("-" * 50)
+    print("Document collection completed.")
