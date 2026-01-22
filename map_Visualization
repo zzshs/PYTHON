@@ -1,0 +1,172 @@
+# =====================================================
+# Subnational Energy Indicator Mapping (Reproducible)
+# =====================================================
+
+import os
+import numpy as np
+import pandas as pd
+import geopandas as gpd
+import matplotlib.pyplot as plt
+import matplotlib.colors as colors
+
+# =====================================================
+# 1. Project paths (user-defined)
+# =====================================================
+
+BASE_DIR = os.path.abspath(".")
+DATA_DIR = os.path.join(BASE_DIR, "data")
+MAP_DIR  = os.path.join(DATA_DIR, "maps")
+OUT_DIR  = os.path.join(BASE_DIR, "figures")
+
+os.makedirs(OUT_DIR, exist_ok=True)
+
+# =====================================================
+# 2. Load tabular data
+# =====================================================
+
+# Example structure:
+# country_code | admin0 | admin1 | admin2 | year | capacity_mw
+df_admin0 = pd.read_csv(os.path.join(DATA_DIR, "energy_admin0.csv"))
+df_admin1 = pd.read_csv(os.path.join(DATA_DIR, "energy_admin1.csv"))
+df_admin2 = pd.read_csv(os.path.join(DATA_DIR, "energy_admin2.csv"))
+
+# =====================================================
+# 3. Load geographic boundaries
+# =====================================================
+
+map_admin0 = gpd.read_file(os.path.join(MAP_DIR, "admin0.gpkg"))
+map_admin1 = gpd.read_file(os.path.join(MAP_DIR, "admin1.gpkg"))
+map_admin2 = gpd.read_file(os.path.join(MAP_DIR, "admin2.gpkg"))
+
+# Standardize country names for merging
+map_admin0["country_name"] = (
+    map_admin0["country_name"]
+    .str.replace(r"\s*\(.*", "", regex=True)
+    .str.replace(r"[.,/_-]", " ", regex=True)
+    .str.split()
+    .str.join(" ")
+)
+
+# =====================================================
+# 4. Visualization function
+# =====================================================
+
+def draw_subnational_maps(
+    gdf_lvl1,
+    gdf_lvl2,
+    base_lvl1,
+    base_lvl2,
+    output_path,
+    output_name,
+    value_col
+):
+    """
+    Draw side-by-side subnational maps for two administrative levels.
+    """
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+
+    values = pd.concat([
+        gdf_lvl1[value_col],
+        gdf_lvl2[value_col]
+    ]).dropna().values
+
+    if len(values) == 0:
+        values = np.array([0.0])
+
+    vmin, vmax = values.min(), values.max()
+    vmed = np.median(values)
+
+    norm = colors.TwoSlopeNorm(vmin=vmin, vcenter=vmed, vmax=vmax)
+
+    base_lvl1.plot(ax=ax1, facecolor="none", edgecolor="black", linewidth=0.3)
+    gdf_lvl1.plot(
+        ax=ax1,
+        column=value_col,
+        cmap="Spectral_r",
+        norm=norm,
+        linewidth=0,
+        missing_kwds={"color": "lightgrey"}
+    )
+    ax1.set_title("Administrative Level 1")
+    ax1.axis("off")
+
+    base_lvl2.plot(ax=ax2, facecolor="none", edgecolor="black", linewidth=0.3)
+    gdf_lvl2.plot(
+        ax=ax2,
+        column=value_col,
+        cmap="Spectral_r",
+        norm=norm,
+        linewidth=0,
+        missing_kwds={"color": "lightgrey"}
+    )
+    ax2.set_title("Administrative Level 2")
+    ax2.axis("off")
+
+    sm = plt.cm.ScalarMappable(cmap="Spectral_r", norm=norm)
+    sm._A = []
+    fig.colorbar(sm, ax=[ax1, ax2], fraction=0.03)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(output_path, output_name), dpi=300)
+    plt.close()
+
+# =====================================================
+# 5. Countries and indicators
+# =====================================================
+
+countries = [
+    (["ESP"], "Spain"),
+    (["ITA"], "Italy"),
+    (["POL"], "Poland"),
+    (["BRA"], "Brazil"),
+    (["MEX"], "Mexico"),
+    (["COL"], "Colombia"),
+    (["ZAF"], "South Africa"),
+    (["MAR"], "Morocco"),
+]
+
+
+indicator_map = {
+    "capacity_mw": "Generation Capacity (MW)"
+}
+
+# =====================================================
+# 6. Mapping loop
+# =====================================================
+
+for iso_list, country_name in countries:
+
+    country_out = os.path.join(OUT_DIR, country_name)
+    os.makedirs(country_out, exist_ok=True)
+
+    admin1_data = df_admin1[df_admin1["country_code"].isin(iso_list)]
+    admin2_data = df_admin2[df_admin2["country_code"].isin(iso_list)]
+
+    admin1_map = map_admin1[map_admin1["country_code"].isin(iso_list)]
+    admin2_map = map_admin2[map_admin2["country_code"].isin(iso_list)]
+
+    gdf_lvl1 = admin1_map.merge(
+        admin1_data,
+        on=["country_code", "admin1"],
+        how="left"
+    )
+
+    gdf_lvl2 = admin2_map.merge(
+        admin2_data,
+        on=["country_code", "admin1", "admin2"],
+        how="left"
+    )
+
+    for value_col in indicator_map.keys():
+        output_name = f"{country_name}_{value_col}.png"
+
+        draw_subnational_maps(
+            gdf_lvl1,
+            gdf_lvl2,
+            admin1_map,
+            admin2_map,
+            country_out,
+            output_name,
+            value_col
+        )
