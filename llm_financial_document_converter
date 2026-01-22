@@ -1,0 +1,219 @@
+"""
+LLM-based financial table extraction pipeline
+----------------------------------------------
+
+This script demonstrates a document-agnostic pipeline for converting
+heterogeneous financial documents (PDF, Excel, Word, CSV) into
+standardized, machine-readable tables using schema-constrained LLM outputs.
+
+All paths, inputs, and examples are synthetic or publicly reproducible.
+No proprietary data is included.
+"""
+
+import os
+import glob
+import json
+from typing import List, Optional
+
+import pandas as pd
+from pydantic import BaseModel
+from PIL import Image
+import fitz  # PyMuPDF
+import docx  # python-docx
+from google import genai
+from google.genai import types as genai_types
+
+pd.set_option("future.no_silent_downcasting", True)
+
+# =====================================================
+# 0. Configuration (SAFE FOR PUBLIC REPO)
+# =====================================================
+
+# API key must be provided via environment variable
+# export GENAI_API_KEY="your_key_here"
+GENAI_API_KEY = os.getenv("GENAI_API_KEY")
+if not GENAI_API_KEY:
+    raise RuntimeError("GENAI_API_KEY not set in environment variables.")
+
+client = genai.Client(api_key=GENAI_API_KEY)
+MODEL_NAME = "gemini-2.5-flash"
+
+DATA_DIR = "./sample_inputs"
+OUTPUT_DIR = "./outputs"
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+# =====================================================
+# 1. Target Metrics (Standardized)
+# =====================================================
+
+TARGET_METRICS = [
+    ("tax_revenue", "Tax revenue or similar own-source taxes"),
+    ("rental_income", "Rental income from public assets"),
+    ("fees_and_charges", "User fees and service charges"),
+    ("sales_and_hire", "Sales, hire charges, or asset disposals"),
+    ("investment_income", "Interest or investment income"),
+    ("total_income", "Total reported income"),
+    ("establishment_expenses", "Personnel and establishment expenses"),
+    ("programme_expenses", "Programme or project expenditures"),
+    ("total_expenditure", "Total reported expenditure"),
+]
+
+METRICS_PROMPT = "\n".join(
+    [f"- {k}: {v}" for k, v in TARGET_METRICS]
+)
+
+def build_prompt(source_type: str, filename: str) -> str:
+    return (
+        "You are a careful financial data extraction system.\n"
+        f"Source type: {source_type}\n"
+        f"Source file: {filename}\n\n"
+        "Task:\n"
+        "1. Read all relevant income and expenditure tables.\n"
+        "2. Extract the standardized metrics listed below.\n"
+        "3. If multiple reporting periods exist, return one object per period.\n"
+        "4. All numeric values must be plain numbers (no symbols).\n"
+        "5. If a value cannot be identified reliably, return null.\n\n"
+        "Metrics:\n"
+        f"{METRICS_PROMPT}\n\n"
+        "Output must strictly follow the provided JSON schema."
+    )
+
+# =====================================================
+# 2. Output Schema
+# =====================================================
+
+class MetricDetail(BaseModel):
+    standard_name: str
+    original_line_item: Optional[str]
+    amount: Optional[float]
+
+class FinancialMetrics(BaseModel):
+    reporting_period: str
+    metrics: List[MetricDetail]
+
+class FinalReport(BaseModel):
+    metrics_by_period: List[FinancialMetrics]
+
+# =====================================================
+# 3. File Readers
+# =====================================================
+
+def pdf_to_images(path, max_pages=8):
+    images = []
+    doc = fitz.open(path)
+    matrix = fitz.Matrix(3, 3)
+    for i in range(min(len(doc), max_pages)):
+        pix = doc[i].get_pixmap(matrix=matrix, alpha=False)
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        images.append(img)
+    doc.close()
+    return images
+
+def excel_to_text(path, max_rows=80):
+    tables = []
+    xls = pd.ExcelFile(path)
+    for sheet in xls.sheet_names[:5]:
+        df = pd.read_excel(path, sheet_name=sheet, header=None)
+        df.dropna(how="all", inplace=True)
+        df.dropna(how="all", axis=1, inplace=True)
+        if not df.empty:
+            tables.append(df.head(max_rows).to_markdown(index=False))
+    return tables
+
+def csv_to_text(path, max_rows=80):
+    df = pd.read_csv(path, header=None)
+    df.dropna(how="all", inplace=True)
+    df.dropna(how="all", axis=1, inplace=True)
+    return [df.head(max_rows).to_markdown(index=False)]
+
+def word_to_text(path):
+    tables = []
+    doc = docx.Document(path)
+    for table in doc.tables:
+        rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        df = pd.DataFrame(rows)
+        df.dropna(how="all", inplace=True)
+        df.dropna(how="all", axis=1, inplace=True)
+        if not df.empty:
+            tables.append(df.to_markdown(index=False))
+    return tables
+
+# =====================================================
+# 4. LLM Call
+# =====================================================
+
+def call_llm(contents, source_type, filename):
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=[build_prompt(source_type, filename)] + contents,
+        config=genai_types.GenerateContentConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+            response_schema=FinalReport,
+        ),
+    )
+    return json.loads(response.text)
+
+# =====================================================
+# 5. Extractors
+# =====================================================
+
+def extract(path):
+    ext = os.path.splitext(path)[1].lower()
+    name = os.path.basename(path)
+
+    if ext == ".pdf":
+        images = pdf_to_images(path)
+        return call_llm(images, "PDF", name)
+
+    if ext in [".xlsx", ".xls"]:
+        tables = excel_to_text(path)
+        return call_llm(["\n".join(tables)], "Excel", name)
+
+    if ext == ".csv":
+        tables = csv_to_text(path)
+        return call_llm(tables, "CSV", name)
+
+    if ext == ".docx":
+        tables = word_to_text(path)
+        return call_llm(tables, "Word", name)
+
+    return None
+
+# =====================================================
+# 6. Main Pipeline
+# =====================================================
+
+if __name__ == "__main__":
+
+    files = []
+    for ext in ["pdf", "xlsx", "xls", "csv", "docx"]:
+        files += glob.glob(os.path.join(DATA_DIR, f"**/*.{ext}"), recursive=True)
+
+    print(f"Found {len(files)} input files.")
+
+    for path in files:
+        print(f"Processing: {os.path.basename(path)}")
+        result = extract(path)
+
+        if not result or "metrics_by_period" not in result:
+            print("  -> No extractable data.")
+            continue
+
+        rows = []
+        for block in result["metrics_by_period"]:
+            row = {
+                "source_file": os.path.basename(path),
+                "reporting_period": block.get("reporting_period"),
+            }
+            for m in block["metrics"]:
+                row[m["standard_name"]] = m.get("amount")
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        outname = os.path.splitext(os.path.basename(path))[0] + "_metrics.csv"
+        df.to_csv(os.path.join(OUTPUT_DIR, outname), index=False)
+
+        print(f"  -> Saved {outname}")
+
+    print("Pipeline completed.")
